@@ -93,10 +93,17 @@ if USE_GNUPG:
             self.fingerprint = result.fingerprints[0]
 
             super(Key, self).save(*args, **kwargs)
+
+            old_addresses = set(address.pk for address in self.address_set.all())
+
             for address in addresses:
                 address, _ = Address.objects.get_or_create(key=self, address=address)
                 address.use_asc = self.use_asc
                 address.save()
+                old_addresses.discard(address.pk)
+
+            for address_pk in old_addresses:
+                Address.objects.get(pk=address_pk).delete()
 
     @python_2_unicode_compatible
     class Address(models.Model):
@@ -115,14 +122,3 @@ if USE_GNUPG:
 
         def __str__(self):
             return self.address
-
-        def delete(self):
-            """
-            Remove any keys for this address.
-            """
-            gpg = GPG(gnupghome=GNUPG_HOME)
-            for key in gpg.list_keys():
-                if self.address in addresses_for_key(gpg, key):
-                    gpg.delete_keys(key["fingerprint"], True)
-                    gpg.delete_keys(key["fingerprint"])
-            super(Address, self).delete()
