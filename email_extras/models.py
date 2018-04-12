@@ -40,7 +40,11 @@ if USE_GNUPG:
             "sent to the address for this key."))
 
         def __str__(self):
-            return self.fingerprint
+            addresses = ", ".join(address.address for address in self.address_set.all())
+            if addresses:
+                return "PGP-Key {} ({})".format(self.fingerprint[:8], addresses)
+            else:
+                return "PGP-Key {}".format(self.fingerprint[:8])
 
         @property
         def email_addresses(self):
