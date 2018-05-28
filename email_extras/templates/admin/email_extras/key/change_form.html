@@ -11,6 +11,6 @@
 
 {% block after_related_objects %}{{ block.super }}
 <div class="submit-row submit-row-custom">
-	<input type="submit" value="{% trans 'Import Key' %}" class="default" name="_save" />
+	<input type="submit" value="{% if add %}{% trans 'Import Key' %}{% else %}{% trans 'Update Key' %}{% endif %}" class="default" name="_save" />
 </div>
 {% endblock %}
