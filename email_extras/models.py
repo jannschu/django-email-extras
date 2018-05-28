@@ -74,7 +74,7 @@ if USE_GNUPG:
             assert len(result.fingerprints) == 1
             fp = result.fingerprints[0]
             key_data = next(k for k in gpg.list_keys() if k["fingerprint"] == fp)
-            if 'expires' in key_data:
+            if 'expires' in key_data and re.match(r'^0|[1-9]\d*', key_data['expires']):
                 if int(key_data['expires']) < time():
                     raise ValidationError(_("The key is expired"))
 
