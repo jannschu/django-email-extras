@@ -8,7 +8,7 @@ from django.utils import six
 from django.utils.encoding import smart_text
 
 from email_extras.settings import (USE_GNUPG, GNUPG_HOME, ALWAYS_TRUST,
-                                   GNUPG_ENCODING)
+                                   GNUPG_ENCODING, SIGN)
 
 
 if USE_GNUPG:
@@ -81,7 +81,7 @@ def send_mail(subject, body_text, addr_from, recipient_list,
     def encrypt_if_key(body, addr_list):
         if has_pgp_key(addr_list[0]):
             encrypted = gpg.encrypt(body, addr_list[0],
-                                    always_trust=ALWAYS_TRUST)
+                                    always_trust=ALWAYS_TRUST, sign=SIGN)
             if encrypted == "" and body != "":  # encryption failed
                 raise EncryptionFailedError("Encrypting mail to %s failed.",
                                             addr_list[0])
