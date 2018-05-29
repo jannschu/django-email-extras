@@ -1,6 +1,7 @@
 from __future__ import with_statement
 from os.path import basename
 from warnings import warn
+import re
 
 from django.template import loader
 from django.core.mail import EmailMultiAlternatives, get_connection
@@ -30,6 +31,18 @@ def addresses_for_key(gpg, key):
             addresses.extend([address.split("<")[-1].strip(">")
                               for address in key["uids"] if address])
     return addresses
+
+
+RE_CLEAN_KEY = re.compile(
+        "(" + 
+            "|".join([re.escape(c) for c in r'''~!@#$%^&*()_+`-={}|[]\;':"<>?,./- ''']) +
+        ")*(?=-----(?:BEGIN|END) PGP)")
+
+
+def clean_key(key):
+    # PGP does accept some additional characters which we need to
+    # remove for GPG to accept the key
+    return re.sub(RE_CLEAN_KEY, '', key.strip())
 
 
 def send_mail(subject, body_text, addr_from, recipient_list,

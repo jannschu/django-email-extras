@@ -11,16 +11,11 @@ from django.utils.encoding import python_2_unicode_compatible
 from django.utils.translation import ugettext_lazy as _
 
 from email_extras.settings import USE_GNUPG, GNUPG_HOME
-from email_extras.utils import addresses_for_key
+from email_extras.utils import addresses_for_key, clean_key
 
 
 if USE_GNUPG:
     from gnupg import GPG
-
-    RE_CLEAN_KEY = re.compile(
-        "(" + 
-            "|".join([re.escape(c) for c in r'''~!@#$%^&*()_+`-={}|[]\;':"<>?,./- ''']) +
-        ")*(?=-----(?:BEGIN|END) PGP)")
 
     @python_2_unicode_compatible
     class Key(models.Model):
@@ -58,9 +53,7 @@ if USE_GNUPG:
             framework.
             """
             super().clean()
-            # PGP does accept some additional characters which we need to
-            # remove for GPG to accept the key
-            self.key = re.sub(RE_CLEAN_KEY, '', self.key.strip())
+            self.key = clean_key(self.key)
             gpg = GPG()
             result = gpg.import_keys(self.key)
 
@@ -78,21 +71,34 @@ if USE_GNUPG:
                 if int(key_data['expires']) < time():
                     raise ValidationError(_("The key is expired"))
 
-            problems = [(result.problem_reason[key['problem']], key.get('text'))
-                        for key in result.results if 'problem' in key]
-            if problems and request:
-                problem_text = _("There problems with the PGP key: ") + \
-                    ".".join(_(text or reason) for reason, text in problems) + \
-                    "."
-                messages.warning(request, problem_text)
+            if request is not None:
+                problems = [(result.problem_reason[key['problem']], key.get('text'))
+                            for key in result.results if 'problem' in key]
+                if problems:
+                    problem_text = _("There are problems with the PGP key: ") + \
+                        ".".join(_(text or reason) for reason, text in problems) + \
+                        "."
+                    messages.warning(request, problem_text)
+
+        @classmethod
+        def read_addresses(cls, key_data):
+            gpg = GPG()
+            result = gpp.import_keys(clean_key(key_data))
+            if result.count == 1 and result.n_revoc == 0:
+                addresses = set()
+                for key in result.results:
+                    addresses.update(addresses_for_key(gpg, key))
+                return addresses
+            else:
+                return None
 
         def save(self, *args, **kwargs):
             gpg = GPG(gnupghome=GNUPG_HOME)
             result = gpg.import_keys(self.key)
 
-            addresses = []
+            addresses = set()
             for key in result.results:
-                addresses.extend(addresses_for_key(gpg, key))
+                addresses.update(addresses_for_key(gpg, key))
 
             self.fingerprint = result.fingerprints[0]
 
