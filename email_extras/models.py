@@ -84,7 +84,7 @@ if USE_GNUPG:
         @classmethod
         def read_addresses(cls, key_data):
             gpg = GPG()
-            result = gpp.import_keys(clean_key(key_data))
+            result = gpg.import_keys(clean_key(key_data))
             if result.count == 1 and result.n_revoc == 0:
                 addresses = set()
                 for key in result.results:
@@ -119,7 +119,7 @@ if USE_GNUPG:
         def delete(self):
             super().delete()
             gpg = GPG(gnupghome=GNUPG_HOME)
-            gpp.delete_keys([self.fingerprint])            
+            gpg.delete_keys([self.fingerprint])            
 
 
     @python_2_unicode_compatible
