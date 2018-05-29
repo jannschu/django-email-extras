@@ -29,7 +29,8 @@ if USE_GNUPG:
             verbose_name_plural = _("Keys")
 
         key = models.TextField()
-        fingerprint = models.CharField(max_length=200, blank=True, editable=False)
+        fingerprint = models.CharField(max_length=200, editable=False,
+            blank=True, unique=True, null=True)
         use_asc = models.BooleanField(default=False, help_text=_(
             "If True, an '.asc' extension will be added to email attachments "
             "sent to the address for this key."))
@@ -114,6 +115,12 @@ if USE_GNUPG:
 
             for address_pk in old_addresses:
                 Address.objects.get(pk=address_pk).delete()
+
+        def delete(self):
+            super().delete()
+            gpg = GPG(gnupghome=GNUPG_HOME)
+            gpp.delete_keys([self.fingerprint])            
+
 
     @python_2_unicode_compatible
     class Address(models.Model):
