@@ -15,7 +15,7 @@ from email_extras.utils import addresses_for_key, clean_key
 
 
 if USE_GNUPG:
-    from gnupg import GPG
+    from pretty_bad_protocol.gnupg import GPG
 
     @python_2_unicode_compatible
     class Key(models.Model):
@@ -58,11 +58,11 @@ if USE_GNUPG:
             gpg = GPG()
             result = gpg.import_keys(self.key)
 
-            if result.count == 0:
+            if result.counts['count'] == 0:
                 raise ValidationError(_("No key was found"))
-            if result.count > 1:
+            if result.counts['count'] > 1:
                 raise ValidationError(_("More than one key was imported"))
-            if result.n_revoc > 0:
+            if result.counts['n_revoc'] > 0:
                 raise ValidationError(_("The key is revoked"))
 
             assert len(result.fingerprints) == 1
@@ -73,11 +73,11 @@ if USE_GNUPG:
                     raise ValidationError(_("The key is expired"))
 
             if request is not None:
-                problems = [(result.problem_reason[key['problem']], key.get('text'))
-                            for key in result.results if 'problem' in key]
+                problems = [key['status']
+                            for key in result.results if key['fingerprint'] is None]
                 if problems:
                     problem_text = _("There are problems with the PGP key: ") + \
-                        ".".join(_(text or reason) for reason, text in problems) + \
+                        ". ".join(problems) + \
                         "."
                     messages.warning(request, problem_text)
 
@@ -85,21 +85,16 @@ if USE_GNUPG:
         def read_addresses(cls, key_data):
             gpg = GPG()
             result = gpg.import_keys(clean_key(key_data))
-            if result.count == 1 and result.n_revoc == 0:
-                addresses = set()
-                for key in result.results:
-                    addresses.update(addresses_for_key(gpg, key))
-                return addresses
+            if result.counts['count'] == 1 and result.counts['n_revoc'] == 0:
+                return set(addresses_for_key(gpg, result.fingerprints[0]))
             else:
                 return None
 
         def save(self, *args, **kwargs):
-            gpg = GPG(gnupghome=GNUPG_HOME)
+            gpg = GPG(homedir=GNUPG_HOME)
             result = gpg.import_keys(self.key)
 
-            addresses = set()
-            for key in result.results:
-                addresses.update(addresses_for_key(gpg, key))
+            addresses = set(addresses_for_key(gpg, result.fingerprints[0]))
 
             self.fingerprint = result.fingerprints[0]
 
@@ -118,8 +113,8 @@ if USE_GNUPG:
 
         def delete(self):
             super().delete()
-            gpg = GPG(gnupghome=GNUPG_HOME)
-            gpg.delete_keys([self.fingerprint])            
+            gpg = GPG(homedir=GNUPG_HOME)
+            gpg.delete_keys(self.fingerprint)
 
 
     @python_2_unicode_compatible
