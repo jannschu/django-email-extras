@@ -29,10 +29,11 @@ setup(
     zip_safe=False,
     include_package_data=True,
     install_requires=[
-        "pretty-bad-protocol"
+        "gpg==1.10",
     ],
     extras_require={
         'dev': [
+            "django",
             "sphinx-me",
         ]
     },

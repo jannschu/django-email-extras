@@ -12,8 +12,9 @@ from django.utils import six
 from django.utils.encoding import smart_text
 from django.conf import settings
 
-from email_extras.settings import (USE_GNUPG, GNUPG_HOME, ALWAYS_TRUST,
-                                   SIGN)
+from email_extras.settings import GNUPG_HOME, ALWAYS_TRUST, SIGN
+from email_extras.gpg import GPG, constants, HASH_ALGORITHM
+from email_extras.models import Address
 
 
 # See https://code.djangoproject.com/ticket/29830
@@ -30,47 +31,6 @@ def _29830_set_payload(self, payload, charset=None):
         charset = utf8_charset_qp if has_long_lines else utf8_charset
     MIMEText.set_payload(self, payload, charset=charset)
 SafeMIMEText.set_payload = _29830_set_payload
-
-
-if USE_GNUPG:
-    from pretty_bad_protocol.gnupg import GPG
-
-
-class EncryptionFailedError(Exception):
-    pass
-
-
-def addresses_for_key(gpg, fingerprint):
-    """
-    Takes a key and extracts the email addresses for it.
-    """
-    addresses = []
-    for key in gpg.list_keys():
-        if key["fingerprint"] == fingerprint:
-            addresses.extend([address.split("<")[-1].strip(">")
-                              for address in key["uids"] if address])
-    return addresses
-
-
-def fingerprints_for_address(gpg, address):
-    fps = []
-    for key in gpg.list_keys():
-        for uid in key["uids"]:
-            if uid.split("<")[-1].strip(">") == address:
-                fps.append(key["fingerprint"])
-    return fps
-
-
-RE_CLEAN_KEY = re.compile(
-        "(" + 
-            "|".join([re.escape(c) for c in r'''~!@#$%^&*()_+`-={}|[]\;':"<>?,./- ''']) +
-        ")*(?=-----(?:BEGIN|END) PGP)")
-
-
-def clean_key(key):
-    # PGP does accept some additional characters which we need to
-    # remove for GPG to accept the key
-    return re.sub(RE_CLEAN_KEY, '', key.strip())
 
 
 def send_mail(subject, body_text, addr_from, recipient_list,
@@ -103,15 +63,12 @@ def send_mail(subject, body_text, addr_from, recipient_list,
         fail_silently=fail_silently)
 
     # Obtain a list of the recipients that have gpg keys installed.
-    key_addresses = {}
-    gpg = None
-    if USE_GNUPG:
-        from email_extras.models import Address
-        key_addresses = dict(Address.objects.filter(address__in=recipient_list)
-                                            .values_list('address', 'use_asc'))
-        # Create the gpg object.
-        if key_addresses:
-            gpg = GPG(homedir=GNUPG_HOME)
+    key_addresses = dict(Address.objects.filter(address__in=recipient_list)
+                                        .values_list('address', 'use_asc'))
+    if key_addresses:
+        gpg = GPG()
+    else:
+        gpg = None
 
     # Load attachments and create name/data tuples.
     attachments_parts = []
@@ -193,7 +150,7 @@ class PGPEmailMultiAlternatives(EmailMultiAlternatives):
         basetype, subtype = mimetype.split('/', 1)
         if basetype == "text":
             encoding = self.encoding or settings.DEFAULT_CHARSET
-            if not isinstance(encoders, emailcharset.Charset):
+            if not isinstance(encoding, emailcharset.Charset):
                 encoding = emailcharset.Charset(encoding)
             encoding.body_encoding = emailcharset.QP
             return SafeMIMEText(content, subtype, encoding)
@@ -209,32 +166,34 @@ class PGPEmailMultiAlternatives(EmailMultiAlternatives):
             sign_text = re.sub('\r?\n', '\r\n', sign_msg.as_string())
             if sign_msg.is_multipart() and not sign_text.endswith("\r\n"):
                 sign_text += "\r\n"
-            signature = self.gpg.sign(
-                sign_text,
-                detach=True, clearsign=False,
-                digest_algo='SHA512')
-            if signature:
+            signature, sig_info = self.gpg.sign(
+                sign_text.encode(),
+                mode=constants.SIG_MODE_DETACH)
+            if signature and sig_info.signatures:
+                hash_algo = HASH_ALGORITHM[sig_info.signatures[0].hash_algo]
                 msg = SafeMIMEMultipart(
                     _subtype="signed",
                     protocol="application/pgp-signature",
-                    mictype="pgp-sha512")
+                    mictype="pgp-{}".format(hash_algo))
                 msg.attach(sign_msg)
                 sig = MIMEBase('application', 'pgp-signature', name='signature.asc')
                 sig.add_header('Content-Disposition', 'attachment', filename='signature.asc')
                 sig.add_header('Content-Description', 'Message signed with OpenPGP', filename='signature.asc')
-                sig.set_payload(signature.data, 'ascii')
+                sig.set_payload(signature, 'ascii')
                 msg.attach(sig)
             elif not self.fail_silently:
                 raise ValueError("PGP signing failed")
         if self.encrypt:
-            fingerprints = []
+            recipients = set()
             for to in self.to:
-                fps = fingerprints_for_address(self.gpg, to)
-                if not fps:
+                keys = list(self.gpg.keylist(pattern=to))
+                if not keys:
                     raise ValueError("Can not find key for address {}".format(to))
-                fingerprints += fps
-            encrypted = self.gpg.encrypt(msg.as_string(), *fingerprints)
-            if encrypted:
+                recipients = recipients.union(keys)
+            encrypted, enc_result, _ = self.gpg.encrypt(
+                msg.as_bytes(), list(recipients), sign=False,
+                always_trust=ALWAYS_TRUST)
+            if encrypted and not enc_result.invalid_recipients:
                 msg = SafeMIMEMultipart(
                     _subtype="encrypted",
                     protocol="application/pgp-encrypted")
@@ -245,7 +204,7 @@ class PGPEmailMultiAlternatives(EmailMultiAlternatives):
                 body = MIMEBase('application', 'octet-stream', name='encrypted.asc')
                 body.add_header('Content-Disposition', 'inline', filename='encrypted.asc')
                 body.add_header('Content-Description', 'OpenPGP encrypted message')
-                body.set_payload(encrypted.data, 'ascii')
+                body.set_payload(encrypted, 'ascii')
                 msg.attach(body)
                 msg.preamble = "This is an OpenPGP/MIME encrypted message (RFC 2400 and 3156)"
             elif not self.fail_silently:

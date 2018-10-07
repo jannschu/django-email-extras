@@ -1,4 +1,3 @@
-
 from __future__ import unicode_literals
 
 import re
@@ -10,127 +9,121 @@ from django.db import models
 from django.utils.encoding import python_2_unicode_compatible
 from django.utils.translation import ugettext_lazy as _
 
-from email_extras.settings import USE_GNUPG, GNUPG_HOME
-from email_extras.utils import addresses_for_key, clean_key
+from email_extras.gpg import GPG, constants, clean_key
 
 
-if USE_GNUPG:
-    from pretty_bad_protocol.gnupg import GPG
+@python_2_unicode_compatible
+class Key(models.Model):
+    """
+    Accepts a key and imports it via admin's save_model which
+    omits saving.
+    """
 
-    @python_2_unicode_compatible
-    class Key(models.Model):
+    class Meta:
+        verbose_name = _("Key")
+        verbose_name_plural = _("Keys")
+
+    key = models.TextField()
+    fingerprint = models.CharField(max_length=200, editable=False,
+        blank=True, unique=True, null=True)
+    use_asc = models.BooleanField(default=False, help_text=_(
+        "If True, an '.asc' extension will be added to email attachments "
+        "sent to the address for this key."))
+
+    def __str__(self):
+        addresses = ", ".join(address.address for address in self.address_set.all())
+        if addresses:
+            return "PGP-Key {} ({})".format(self.fingerprint[:8], addresses)
+        else:
+            return "PGP-Key {}".format(self.fingerprint[:8])
+
+    @property
+    def email_addresses(self):
+        return ",".join(str(address) for address in self.address_set.all())
+
+    def clean(self, request=None):
         """
-        Accepts a key and imports it via admin's save_model which
-        omits saving.
+        Validates the key.
+
+        If request is given warnings may be added using Django's messages
+        framework.
         """
+        super().clean()
+        self.key = clean_key(self.key)
+        with GPG(temporary=True) as gpg:
+            gpg.op_import(self.key.encode())
+            result = gpg.op_import_result()
 
-        class Meta:
-            verbose_name = _("Key")
-            verbose_name_plural = _("Keys")
+        if result.considered == 0:
+            raise ValidationError(_("No key was found"))
+        if result.considered > 1:
+            raise ValidationError(_("Includes more than one key"))
 
-        key = models.TextField()
-        fingerprint = models.CharField(max_length=200, editable=False,
-            blank=True, unique=True, null=True)
-        use_asc = models.BooleanField(default=False, help_text=_(
-            "If True, an '.asc' extension will be added to email attachments "
-            "sent to the address for this key."))
+        fpr = result.imports[0].fpr
+        key = gpg.get_key(fpr)
 
-        def __str__(self):
-            addresses = ", ".join(address.address for address in self.address_set.all())
-            if addresses:
-                return "PGP-Key {} ({})".format(self.fingerprint[:8], addresses)
-            else:
-                return "PGP-Key {}".format(self.fingerprint[:8])
+        if key.revoked:
+            raise ValidationError(_("The key is revoked"))
+        if key.expired:
+            raise ValidationError(_("The key is expired"))
+        if key.invalid or not key.can_encrypt:
+            raise ValidationError(_("The key is invalid"))
 
-        @property
-        def email_addresses(self):
-            return ",".join(str(address) for address in self.address_set.all())
-
-        def clean(self, request=None):
-            """
-            Validates the key.
-
-            If request is given warnings may be added using Django's messages
-            framework.
-            """
-            super().clean()
-            self.key = clean_key(self.key)
-            gpg = GPG()
-            result = gpg.import_keys(self.key)
-
-            if result.counts['count'] == 0:
-                raise ValidationError(_("No key was found"))
-            if result.counts['count'] > 1:
-                raise ValidationError(_("More than one key was imported"))
-            if result.counts['n_revoc'] > 0:
-                raise ValidationError(_("The key is revoked"))
-
-            assert len(result.fingerprints) == 1
-            fp = result.fingerprints[0]
-            key_data = next(k for k in gpg.list_keys() if k["fingerprint"] == fp)
-            if 'expires' in key_data and re.match(r'^0|[1-9]\d*', key_data['expires']):
-                if int(key_data['expires']) < time():
-                    raise ValidationError(_("The key is expired"))
-
-            if request is not None:
-                problems = [key['status']
-                            for key in result.results if key['fingerprint'] is None]
-                if problems:
-                    problem_text = _("There are problems with the PGP key: ") + \
-                        ". ".join(problems) + \
-                        "."
-                    messages.warning(request, problem_text)
-
-        @classmethod
-        def read_addresses(cls, key_data):
-            gpg = GPG()
-            result = gpg.import_keys(clean_key(key_data))
-            if result.counts['count'] == 1 and result.counts['n_revoc'] == 0:
-                return set(addresses_for_key(gpg, result.fingerprints[0]))
+    @classmethod
+    def read_addresses(cls, key_data):
+        with GPG(temporary=True) as gpg:
+            gpg.op_import(clean_key(key_data).encode())
+            result = gpg.op_import_result()
+            if result.considered == 1:
+                key = gpg.get_key(result.imports[0].fpr)
+                return set(uid.email for uid in key.uids)
             else:
                 return None
 
-        def save(self, *args, **kwargs):
-            gpg = GPG(homedir=GNUPG_HOME)
-            result = gpg.import_keys(self.key)
+    def save(self, *args, **kwargs):
+        with GPG() as gpg:
+            gpg.op_import(self.key.encode())
+            result = gpg.op_import_result()
+            self.fingerprint = result.imports[0].fpr
+            key = gpg.get_key(self.fingerprint)
 
-            addresses = set(addresses_for_key(gpg, result.fingerprints[0]))
+        addresses = set(uid.email for uid in key.uids)
 
-            self.fingerprint = result.fingerprints[0]
+        super(Key, self).save(*args, **kwargs)
 
-            super(Key, self).save(*args, **kwargs)
+        old_addresses = set(address.pk for address in self.address_set.all())
 
-            old_addresses = set(address.pk for address in self.address_set.all())
+        for address in addresses:
+            address, _ = Address.objects.get_or_create(key=self, address=address)
+            address.use_asc = self.use_asc
+            address.save()
+            old_addresses.discard(address.pk)
 
-            for address in addresses:
-                address, _ = Address.objects.get_or_create(key=self, address=address)
-                address.use_asc = self.use_asc
-                address.save()
-                old_addresses.discard(address.pk)
+        for address_pk in old_addresses:
+            Address.objects.get(pk=address_pk).delete()
 
-            for address_pk in old_addresses:
-                Address.objects.get(pk=address_pk).delete()
-
-        def delete(self):
-            super().delete()
-            gpg = GPG(homedir=GNUPG_HOME)
-            gpg.delete_keys(self.fingerprint)
+    def delete(self):
+        super().delete()
+        with GPG() as gpg:
+            gpg.op_delete_ext(
+                gpg.get_key(self.fingerprint),
+                constants.DELETE_ALLOW_SECRET | constants.DELETE_FORCE)
 
 
-    @python_2_unicode_compatible
-    class Address(models.Model):
-        """
-        Stores the address for a successfully imported key and allows
-        deletion.
-        """
+@python_2_unicode_compatible
+class Address(models.Model):
+    """
+    Stores the address for a successfully imported key and allows
+    deletion.
+    """
 
-        class Meta:
-            verbose_name = _("Address")
-            verbose_name_plural = _("Addresses")
+    class Meta:
+        verbose_name = _("Address")
+        verbose_name_plural = _("Addresses")
 
-        address = models.EmailField(blank=True)
-        key = models.ForeignKey('email_extras.Key', null=True, editable=False)
-        use_asc = models.BooleanField(default=False, editable=False)
+    address = models.EmailField(blank=True)
+    key = models.ForeignKey('email_extras.Key', null=True, editable=False)
+    use_asc = models.BooleanField(default=False, editable=False)
 
-        def __str__(self):
-            return self.address
+    def __str__(self):
+        return self.address
