@@ -4,15 +4,32 @@ from warnings import warn
 import re
 
 from email.mime.base import MIMEBase
-from email import encoders
+from email import encoders, charset as emailcharset
 
 from django.template import loader
 from django.core.mail import EmailMultiAlternatives, SafeMIMEText, SafeMIMEMultipart, get_connection
 from django.utils import six
 from django.utils.encoding import smart_text
+from django.conf import settings
 
 from email_extras.settings import (USE_GNUPG, GNUPG_HOME, ALWAYS_TRUST,
                                    SIGN)
+
+
+# See https://code.djangoproject.com/ticket/29830
+def _29830_set_payload(self, payload, charset=None):
+    from django.core.mail.message import utf8_charset_qp, utf8_charset, RFC5322_EMAIL_LINE_LENGTH_LIMIT
+    from email.mime.text import MIMEText
+    if charset == 'utf-8' and not isinstance(charset, emailcharset.Charset):
+        has_long_lines = any(
+            len(l.encode('utf-8')) > RFC5322_EMAIL_LINE_LENGTH_LIMIT
+            for l in payload.splitlines()
+        )
+        # Quoted-Printable encoding has the side effect of shortening long
+        # lines, if any (#22561).
+        charset = utf8_charset_qp if has_long_lines else utf8_charset
+    MIMEText.set_payload(self, payload, charset=charset)
+SafeMIMEText.set_payload = _29830_set_payload
 
 
 if USE_GNUPG:
@@ -100,11 +117,13 @@ def send_mail(subject, body_text, addr_from, recipient_list,
     attachments_parts = []
     if attachments is not None:
         for attachment in attachments:
-            # Attachments can be pairs of name/data, or filesystem paths.
-            if not hasattr(attachment, "__iter__"):
+            if not isinstance(attachment, (list, tuple)):
+                attachment = str(attachment)
                 with open(attachment, "rb") as f:
                     attachments_parts.append((basename(attachment), f.read()))
             else:
+                if len(attachment) != 2:
+                    raise ValueError("Attachments can be pairs of name/data, or filesystem paths.")
                 attachments_parts.append(attachment)
 
     # Send emails - encrypted emails needs to be sent individually, while
@@ -123,9 +142,10 @@ def send_mail(subject, body_text, addr_from, recipient_list,
                                         headers=headers,
                                         gpg=gpg,
                                         fail_silently=fail_silently,
+                                        sign=SIGN,
                                         encrypt=addr_list[0] in key_addresses)
         if html_message is not None:
-            msg.attach_alternative("text/html")
+            msg.attach_alternative(html_message, "text/html")
         for parts in attachments_parts:
             msg.attach(*parts)
         msg.send(fail_silently=fail_silently)
@@ -157,21 +177,26 @@ class PGPEmailMultiAlternatives(EmailMultiAlternatives):
     def __init__(self, *args, **kwargs):
         self.gpg = kwargs.pop('gpg')
         self.encrypt = kwargs.pop('encrypt', False)
-        self.fail_silently = kwargs.pop('fail_silently')
+        self.sign = kwargs.pop('sign', False)
+        self.fail_silently = kwargs.pop('fail_silently', False)
         super().__init__(*args, **kwargs)
 
-    def attach(self, filename=None, content=None, mimetype=None):
-        if isinstance(self.body, str) and not re.search(r'\r?\n[ \t\r]*\r?\n\s*\Z', self.body):
-            self.body += '\n\n'
-        super().attach(filename, content, mimetype)
+        if self.sign:
+            encoding = self.encoding or settings.DEFAULT_CHARSET
+            has_long_lines = any(len(line.encode(encoding)) > 76 for line in self.body.splitlines())
+            if has_long_lines or re.search("^From |[ \t\r]$", self.body, re.M):
+                if not isinstance(self.encoding, emailcharset.Charset):
+                    self.encoding = emailcharset.Charset(encoding)
+                self.encoding.body_encoding = emailcharset.QP
 
     def _create_mime_attachment(self, content, mimetype):
         basetype, subtype = mimetype.split('/', 1)
         if basetype == "text":
-            attachment = MIMEBase(basetype, subtype)
-            attachment.set_payload(content)
-            encoders.encode_quopri(attachment)
-            return attachment
+            encoding = self.encoding or settings.DEFAULT_CHARSET
+            if not isinstance(encoders, emailcharset.Charset):
+                encoding = emailcharset.Charset(encoding)
+            encoding.body_encoding = emailcharset.QP
+            return SafeMIMEText(content, subtype, encoding)
         else:
             return super()._create_mime_attachment(content, mimetype)
 
@@ -179,7 +204,7 @@ class PGPEmailMultiAlternatives(EmailMultiAlternatives):
         msg = super()._create_message(msg)
         if self.gpg is None:
             return msg
-        if SIGN:
+        if self.sign:
             sign_msg = msg
             sign_text = re.sub('\r?\n', '\r\n', sign_msg.as_string())
             if sign_msg.is_multipart() and not sign_text.endswith("\r\n"):
@@ -202,9 +227,13 @@ class PGPEmailMultiAlternatives(EmailMultiAlternatives):
             elif not self.fail_silently:
                 raise ValueError("PGP signing failed")
         if self.encrypt:
-            encrypted = self.gpg.encrypt(
-                msg.as_string(), 
-                *fingerprints_for_address(self.gpg, self.to[0]))
+            fingerprints = []
+            for to in self.to:
+                fps = fingerprints_for_address(self.gpg, to)
+                if not fps:
+                    raise ValueError("Can not find key for address {}".format(to))
+                fingerprints += fps
+            encrypted = self.gpg.encrypt(msg.as_string(), *fingerprints)
             if encrypted:
                 msg = SafeMIMEMultipart(
                     _subtype="encrypted",
@@ -222,16 +251,4 @@ class PGPEmailMultiAlternatives(EmailMultiAlternatives):
             elif not self.fail_silently:
                 raise ValueError("PGP encryption failed")
         return msg
-
-
-    # Encrypts body if recipient has a gpg key installed.
-    def encrypt_if_key(body, addr_list):
-        if has_pgp_key(addr_list[0]):
-            encrypted = gpg.encrypt(body, addr_list[0],
-                                    always_trust=ALWAYS_TRUST, sign=SIGN)
-            if encrypted == "" and body != "":  # encryption failed
-                raise EncryptionFailedError("Encrypting mail to %s failed.",
-                                            addr_list[0])
-            return smart_text(encrypted)
-        return body
 
