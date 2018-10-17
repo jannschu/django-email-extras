@@ -47,7 +47,9 @@ RE_CLEAN_KEY = re.compile(
 def clean_key(key):
     # PGP does accept some additional characters which we need to
     # remove for GPG to accept the key
-    return re.sub(RE_CLEAN_KEY, '', key.strip())
+    if isinstance(key, bytes):
+        key = key.decode('ascii')
+    return re.sub(RE_CLEAN_KEY, '', str(key).strip())
 
 
 HASH_ALGORITHM = {}

@@ -49,7 +49,10 @@ class Key(models.Model):
         framework.
         """
         super().clean()
-        self.key = clean_key(self.key)
+        try:
+            self.key = clean_key(self.key)
+        except UnicodeDecodeError:
+            raise ValidationError(_("Key is not valid ASCII"))
         with GPG(temporary=True) as gpg:
             gpg.op_import(self.key.encode())
             result = gpg.op_import_result()
@@ -82,7 +85,8 @@ class Key(models.Model):
 
     def save(self, *args, **kwargs):
         with GPG() as gpg:
-            gpg.op_import(self.key.encode())
+            key = self.key if isinstance(self.key, bytes) else str(self.key).encode()
+            gpg.op_import(key)
             result = gpg.op_import_result()
             self.fingerprint = result.imports[0].fpr
             key = gpg.get_key(self.fingerprint)
