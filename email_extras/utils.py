@@ -63,8 +63,10 @@ def send_mail(subject, body_text, addr_from, recipient_list,
         fail_silently=fail_silently)
 
     # Obtain a list of the recipients that have gpg keys installed.
-    key_addresses = dict(Address.objects.filter(address__in=recipient_list)
-                                        .values_list('address', 'use_asc'))
+    key_addresses = dict(
+        (addr.address, addr.use_asc)
+        for addr in Address.objects.filter(address__in=recipient_list)
+        if addr.key.can_encrypt())
     if key_addresses:
         gpg = GPG()
     else:

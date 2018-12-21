@@ -113,6 +113,10 @@ class Key(models.Model):
                 gpg.get_key(self.fingerprint),
                 constants.DELETE_ALLOW_SECRET | constants.DELETE_FORCE)
 
+    def can_encrypt(self):
+        with GPG() as gpg:
+            return bool(gpg.get_key(self.fingerprint).can_encrypt)
+
 
 @python_2_unicode_compatible
 class Address(models.Model):
