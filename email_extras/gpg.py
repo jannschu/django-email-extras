@@ -4,6 +4,7 @@ import re
 
 import gpg as gpgme
 import gpg.constants as constants
+from gpg.errors import KeyNotFound
 
 from email_extras.settings import GNUPG_HOME
 

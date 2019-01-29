@@ -9,7 +9,7 @@ from django.db import models
 from django.utils.encoding import python_2_unicode_compatible
 from django.utils.translation import ugettext_lazy as _
 
-from email_extras.gpg import GPG, constants, clean_key
+from email_extras.gpg import GPG, constants, clean_key, KeyNotFound
 
 
 @python_2_unicode_compatible
@@ -109,13 +109,19 @@ class Key(models.Model):
     def delete(self):
         super().delete()
         with GPG() as gpg:
-            gpg.op_delete_ext(
-                gpg.get_key(self.fingerprint),
-                constants.DELETE_ALLOW_SECRET | constants.DELETE_FORCE)
+            try:
+                gpg.op_delete_ext(
+                    gpg.get_key(self.fingerprint),
+                    constants.DELETE_ALLOW_SECRET | constants.DELETE_FORCE)
+            except KeyNotFound:
+                pass
 
     def can_encrypt(self):
         with GPG() as gpg:
-            return bool(gpg.get_key(self.fingerprint).can_encrypt)
+            try:
+                return bool(gpg.get_key(self.fingerprint).can_encrypt)
+            except KeyNotFound:
+                return False
 
 
 @python_2_unicode_compatible
